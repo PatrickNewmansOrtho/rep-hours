@@ -295,6 +295,11 @@ const LOGO_PNG_B64='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABdwAAAJYCAYAAA
 const CATEGORIES=['Acquisition / research','Tenant / guest communication','Maintenance & repairs',
   'Cleaning / turnover','Bookkeeping & finances','Marketing & advertising','Property management',
   'Travel','Education & research','Legal & admin','Other'];
+// The real estate professional these hours are being tracked for. Team members may log entries
+// on her behalf, but every entry's hours belong to her for REPS/STR testing purposes — this is
+// intentionally separate from created_by_email, which honestly records who was actually logged
+// in when the entry was typed (the audit trail).
+const HOURS_OWNER='Stacey Newman';
 let STATE={entries:[],properties:[],personSettings:{},raw:{properties:[],entries:[],person_settings:[]}};
 let currentYear=new Date().getFullYear();
 let currentUserFilter='';           // '' = whole team, else an email (dashboard)
@@ -350,7 +355,7 @@ async function onSession(s){
 
 /* ============================ Data layer ============================ */
 function mapEntry(r){return {id:r.id,date:r.entry_date,propertyId:r.property_id,category:r.category,hours:Number(r.hours),
-  activity:r.activity,notes:r.notes,attachmentPath:r.attachment_path,by:r.created_by_email||''};}
+  activity:r.activity,notes:r.notes,attachmentPath:r.attachment_path,by:r.created_by_email||'',performedBy:r.performed_by||HOURS_OWNER};}
 function mapProp(r){return {id:r.id,name:r.name,address:r.address,type:r.type,othersHours:Number(r.others_hours)};}
 async function boot(){
   const [{data:props},{data:ents},{data:ps}]=await Promise.all([
@@ -374,7 +379,7 @@ async function addOrUpdateEntry(rec,file,oldPath){
     else{ if(oldPath)await sb.storage.from('evidence').remove([oldPath]); attachment_path=path; }
   }
   const base={entry_date:rec.date,property_id:rec.propertyId||null,category:rec.category,hours:rec.hours,
-    activity:rec.activity,notes:rec.notes,attachment_path};
+    activity:rec.activity,notes:rec.notes,attachment_path,performed_by:HOURS_OWNER};
   let res;
   if(rec.id){res=await sb.from('entries').update(base).eq('id',rec.id);}
   else{res=await sb.from('entries').insert(Object.assign({},base,{created_by_email:currentEmail}));}
@@ -491,6 +496,9 @@ async function restoreSnapshot(id){
 /* ============================ Rendering ============================ */
 function entriesForYear(){return STATE.entries.filter(e=>new Date(e.date).getFullYear()===currentYear);}
 function knownUsers(){const set=new Set();STATE.entries.forEach(e=>{if(e.by)set.add(e.by);});if(currentEmail)set.add(currentEmail);return [...set].sort();}
+// Distinct from knownUsers(): this is "whose hours are these" (for REPS/STR testing, the settings
+// person picker, and the CPA report), not "who logged in and typed this entry".
+function knownPerformers(){const set=new Set();STATE.entries.forEach(e=>{if(e.performedBy)set.add(e.performedBy);});set.add(HOURS_OWNER);return [...set].sort();}
 function buildYearOptions(){
   const yrs=new Set(STATE.entries.map(e=>new Date(e.date).getFullYear()));
   yrs.add(new Date().getFullYear());yrs.add(currentYear);
@@ -504,13 +512,13 @@ function renderDashboard(){
   document.getElementById('dashYear').textContent=currentYear;
   // user filter dropdown
   const uf=document.getElementById('userFilter');
-  const users=knownUsers();
+  const users=knownPerformers();
   if(currentUserFilter && !users.includes(currentUserFilter))currentUserFilter='';
   uf.innerHTML='<option value="">Whole team</option>'+users.map(u=>'<option value="'+esc(u)+'" '+(u===currentUserFilter?'selected':'')+'>'+esc(u)+'</option>').join('');
   uf.value=currentUserFilter;
 
   let es=entriesForYear();
-  if(currentUserFilter)es=es.filter(e=>e.by===currentUserFilter);
+  if(currentUserFilter)es=es.filter(e=>e.performedBy===currentUserFilter);
   const total=es.reduce((s,e)=>s+e.hours,0);
   const days=new Set(es.map(e=>e.date)).size;
   const strProps=STATE.properties.filter(p=>p.type==='STR');
@@ -599,9 +607,9 @@ function renderProperties(){
 function renderSettings(){
   document.getElementById('setYearLbl').textContent=currentYear;
   const sp=document.getElementById('setPerson');
-  const users=knownUsers();const cur=sp.value||currentEmail;
+  const users=knownPerformers();const cur=sp.value||HOURS_OWNER;
   sp.innerHTML=users.map(u=>'<option value="'+esc(u)+'">'+esc(u)+'</option>').join('');
-  sp.value=users.includes(cur)?cur:(users[0]||currentEmail);
+  sp.value=users.includes(cur)?cur:(users[0]||HOURS_OWNER);
   document.getElementById('otherHours').value=STATE.personSettings[(sp.value)+'|'+currentYear]||0;
 }
 
@@ -664,8 +672,8 @@ function openPropModal(existing){
 
 /* ============================ CPA per-person PDF ============================ */
 function openCpaModal(){
-  const users=knownUsers();
-  const pre=currentUserFilter||currentEmail;
+  const users=knownPerformers();
+  const pre=currentUserFilter||HOURS_OWNER;
   document.getElementById('modalMount').innerHTML=
    '<div class="modal"><div class="box"><button class="close-x" onclick="closeModal()">&times;</button>'+
     '<h3>CPA report (PDF)</h3>'+
@@ -686,7 +694,7 @@ function buildCpaPdf(email,year){
   const {jsPDF}=window.jspdf;
   const doc=new jsPDF({unit:'pt',format:'letter'});
   const M=48, PW=doc.internal.pageSize.getWidth();
-  const es=STATE.entries.filter(e=>new Date(e.date).getFullYear()===year && e.by===email)
+  const es=STATE.entries.filter(e=>new Date(e.date).getFullYear()===year && e.performedBy===email)
                         .sort((a,b)=>a.date.localeCompare(b.date));
   const total=es.reduce((s,e)=>s+e.hours,0);
   const otherH=Number(STATE.personSettings[email+'|'+year]||0);
@@ -772,7 +780,7 @@ function buildCpaPdf(email,year){
     doc.setFontSize(8);doc.setTextColor(130);
     doc.text('Record-keeping report — not tax advice. Contemporaneous log maintained in REP Hours Tracker.',M,doc.internal.pageSize.getHeight()-24);
     doc.text('Page '+i+' of '+pages,PW-M-40,doc.internal.pageSize.getHeight()-24);}
-  doc.save('REPS-summary-'+shortUser(email)+'-'+year+'.pdf');
+  doc.save('REPS-summary-'+shortUser(email).replace(/\s+/g,'-')+'-'+year+'.pdf');
 }
 function sectionHeading(doc,text,startY,M){
   const bottom=doc.internal.pageSize.getHeight()-70;
@@ -785,8 +793,8 @@ function sectionHeading(doc,text,startY,M){
 /* ============================ Export ============================ */
 function exportCSV(){
   const es=entriesForYear().sort((a,b)=>a.date.localeCompare(b.date));
-  const rows=[['Date','Property','Type','Category','Hours','Activity','Notes','Logged by','Has evidence']];
-  es.forEach(function(e){const p=propById(e.propertyId);rows.push([e.date,p?p.name:'',p?p.type:'',e.category,e.hours,e.activity,e.notes||'',e.by||'',e.attachmentPath?'Yes':'No']);});
+  const rows=[['Date','Property','Type','Category','Hours','Activity','Notes','Performed by','Logged by','Has evidence']];
+  es.forEach(function(e){const p=propById(e.propertyId);rows.push([e.date,p?p.name:'',p?p.type:'',e.category,e.hours,e.activity,e.notes||'',e.performedBy||HOURS_OWNER,e.by||'',e.attachmentPath?'Yes':'No']);});
   const csv=rows.map(r=>r.map(c=>'"'+String(c).replace(/"/g,'""')+'"').join(',')).join('\n');
   const u=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));const a=document.createElement('a');
   a.href=u;a.download='rep-hours-'+currentYear+'.csv';a.click();URL.revokeObjectURL(u);
